@@ -1,15 +1,24 @@
 from flask import Blueprint, jsonify, request
 from src.cache import cache
 import time
-import collections
 from sqlalchemy import or_
 from datetime import datetime, timedelta
 
 from src.db import session
 from src.models import User, Place, Story
+from src.cors import cors
 
 
 maskmap = Blueprint('maskmap', __name__)
+
+
+@maskmap.after_request
+def after_request(response):
+    response.headers.add('Access-Control-Allow-Origin', '*')
+    response.headers.add(
+        'Access-Control-Allow-Headers', 'Content-Type,Authorization')
+    response.headers.add('Access-Control-Allow-Methods', 'POST')
+    return response
 
 
 @maskmap.route('/places', methods=['POST'])
