@@ -1,5 +1,4 @@
 import requests
-import re
 from flask import Blueprint, jsonify
 from datetime import datetime, timedelta
 from dateutil import parser
@@ -11,8 +10,9 @@ from src.models import Status
 from src.helper import (
     is_empty, is_bot, is_not_bot,
     TODAY_STR, TODAY, YESTERDAY_STR,
-    HOTLINE
+    DAERAH
 )
+from src import bot
 
 indonesia = Blueprint('indonesia', __name__)
 JABAR = 'https://coredata.jabarprov.go.id/analytics/covid19/aggregation.json'
@@ -30,7 +30,9 @@ def id():
     data = req.json()
     updated = parser.parse(data['metadata']['lastUpdatedAt']) \
         .replace(tzinfo=None)
-    alldata = session.query(Status).order_by(Status.id.desc()).all()
+    alldata = session.query(Status) \
+        .filter(Status.country_id == "id") \
+        .order_by(Status.created.desc()).all()
     dbDate = ""
     if len(alldata) > 0:
         getData = [_id_beauty(data, row) for row in alldata]
@@ -52,8 +54,8 @@ def id():
                not row['deaths']['diff'] == 0 and \
                not row['recovered']['diff'] == 0 and \
                not row['active_care']['diff'] == 0:
-                return jsonify(row), 200
-        return jsonify(getData[0]), 200
+                return _response(row, 200)
+        return _response(getData[0], 200)
     else:
         new_status = Status(
             confirmed=data['confirmed']['value'],
@@ -65,26 +67,7 @@ def id():
             updated=updated
         )
         session.add(new_status)
-        return jsonify(_id_beauty(data, 0)), 200
-
-
-@indonesia.route('/hotline')
-@limiter.limit(f"1/{sLIMITER}second", key_func=lambda: is_bot(), exempt_when=lambda: is_not_bot()) # noqa
-@cache.cached(timeout=50)
-def hotline():
-    return jsonify(HOTLINE), 200
-
-
-@indonesia.route('/hotline/<state>')
-@limiter.limit(f"1/{sLIMITER}second", key_func=lambda: is_bot(), exempt_when=lambda: is_not_bot()) # noqa
-@cache.cached(timeout=50)
-def hot_line(state):
-    results = []
-    for city in HOTLINE:
-        key = city["kota"].lower()
-        if re.search(r"\b%s" % state.lower(), key):
-            results.append(city)
-    return jsonify(results)
+        return _response(_id_beauty(data, 0), 200)
 
 
 @indonesia.route('/jabar')
@@ -92,7 +75,6 @@ def hot_line(state):
 @cache.cached(timeout=50)
 def jabar():
     result = _default_resp()
-    result['source'] = {"value": "https://pikobar.jabarprov.go.id/"}
 
     response = requests.get(JABAR)
     if not response.status_code == 200:
@@ -114,35 +96,23 @@ def jabar():
     if len(result) == 0:
         jsonify({"message": "Not Found"}), 404
 
+    result['source'] = {"value": "https://pikobar.jabarprov.go.id/"}
     return jsonify(result), 200
 
 
-@indonesia.route('/jakarta')
+@indonesia.route('/<province>')
 @limiter.limit(f"1/{sLIMITER}second", key_func=lambda: is_bot(), exempt_when=lambda: is_not_bot()) # noqa
 @cache.cached(timeout=50)
-def jakarta():
-    return _odi_api("jakarta")
-
-
-@indonesia.route('/banten')
-@limiter.limit(f"1/{sLIMITER}second", key_func=lambda: is_bot(), exempt_when=lambda: is_not_bot()) # noqa
-@cache.cached(timeout=50)
-def banten():
-    return _odi_api("banten")
-
-
-@indonesia.route('/bali')
-@limiter.limit(f"1/{sLIMITER}second", key_func=lambda: is_bot(), exempt_when=lambda: is_not_bot()) # noqa
-@cache.cached(timeout=50)
-def bali():
-    return _odi_api("bali")
-
-
-@indonesia.route('/yogya')
-@limiter.limit(f"1/{sLIMITER}second", key_func=lambda: is_bot(), exempt_when=lambda: is_not_bot()) # noqa
-@cache.cached(timeout=50)
-def yogya():
-    return _odi_api("yogya")
+def province(province):
+    if province in DAERAH:
+        return _odi_api(province)
+    if province == "list":
+        provinsi = [item for item in DAERAH]
+        if True:
+            return jsonify(message=bot.province_list(provinsi)), 200
+        else:
+            return jsonify([item for item in DAERAH]), 200
+    return jsonify(message="Not Found"), 404
 
 
 @indonesia.errorhandler(429)
@@ -154,7 +124,7 @@ def _default_resp():
     return {
         "tanggal": {"value": ""},
         "total_sembuh": {"value": 0, "diff": 0},
-        "total_positif_saat_ini": {"value": 0, "diff": 0},
+        "total_positif": {"value": 0, "diff": 0},
         "total_meninggal": {"value": 0, "diff": 0},
         "proses_pemantauan": {"value": 0},
         "proses_pengawasan": {"value": 0},
@@ -199,20 +169,18 @@ def _jabarset_value(current, before):
 
 
 def _id_beauty(source, db):
-
+    updated = parser.parse(source['metadata']['lastUpdatedAt']) \
+            .replace(tzinfo=None)
     if db == 0:
         confirmed = 0
         deaths = 0
         recovered = 0
         active_care = 0
-        updated = parser.parse(source['metadata']['lastUpdatedAt']) \
-            .replace(tzinfo=None)
     else:
         confirmed = db.confirmed
         deaths = db.deaths
         recovered = db.recovered
         active_care = db.active_care
-        updated = db.updated
     return {
         "confirmed": {
             "value": source['confirmed']['value'],
@@ -238,28 +206,73 @@ def _id_beauty(source, db):
 
 
 def _odi_api(state):
-    result = _default_resp()
-    result['source'] = {"value": "https://indonesia-covid-19.mathdro.id/"}
-
     req = requests.get(ODI_API)
     if not req.status_code == 200:
         jsonify({"message": f"Error when trying to crawl {ODI_API}"}), 404
     prov = {prov["provinsi"]: prov for prov in req.json()["data"]}
+    hasil = prov[DAERAH[state]]
+    todayIsNone = True
 
-    daerah = {
-        "jakarta": "DKI Jakarta",
-        "banten": "Banten",
-        "bali": "Bali",
-        "yogya": "Daerah Istimewa Yogyakarta"
+    result = _default_resp()
+    result['metadata'] = {
+        "source": "https://indonesia-covid-19.mathdro.id/",
+        "province": DAERAH[state].upper()
     }
 
-    hasil = prov[daerah[state]]
+    get_state = session.query(Status) \
+        .filter(Status.country_id == f"id.{state}") \
+        .order_by(Status.created.desc()) \
+        .all()
+
+    if len(get_state) > 0:
+        for row in get_state:
+            if not row.created.date() == datetime.utcnow().date():
+                result["total_sembuh"]["diff"] = \
+                    hasil["kasusSemb"] - row.recovered
+                result["total_positif"]["diff"] = \
+                    hasil["kasusPosi"] - row.confirmed
+                result["total_meninggal"]["diff"] = \
+                    hasil["kasusMeni"] - row.deaths
+                result["metadata"]["diff_date"] = \
+                    row.created.isoformat()
+                result["metadata"]["source_date"] = \
+                    datetime.utcnow().isoformat()
+                break
+            else:
+                todayIsNone = False
+                result["metadata"]["source_date"] = \
+                    row.created.isoformat()
+
+    if todayIsNone:
+        new_status = Status(
+            confirmed=hasil["kasusPosi"],
+            deaths=hasil["kasusMeni"],
+            recovered=hasil["kasusSemb"],
+            active_care=0,
+            country_id=f"id.{state}",
+            created=datetime.utcnow(),
+            updated=datetime.utcnow()
+        )
+        session.add(new_status)
+        result["metadata"]["source_date"] = \
+            datetime.utcnow().isoformat()
 
     result["total_sembuh"]["value"] = hasil["kasusSemb"]
-    result["total_positif_saat_ini"]["value"] = hasil["kasusPosi"]
+    result["total_positif"]["value"] = hasil["kasusPosi"]
     result["total_meninggal"]["value"] = hasil["kasusMeni"]
 
     if len(result) == 0:
         jsonify({"message": "Not Found"}), 404
 
-    return jsonify(result), 200
+    if is_bot():
+        return jsonify(message=bot.province(result)), 200
+    else:
+        return jsonify(result), 200
+
+
+def _response(data, responseCode):
+    if is_bot():
+        return jsonify(message=bot.id(data)), responseCode
+    else:
+        return jsonify(data), responseCode
+
